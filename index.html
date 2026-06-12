@@ -25,15 +25,33 @@
   summary { cursor: pointer; padding: 8px 10px; font-weight: 600; }
   details[open] summary { border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, transparent); }
   .body { padding: 10px; }
-  .tool { font: 600 12px ui-monospace, monospace; }
   .label { font: 600 11px ui-monospace, monospace; opacity:.6; margin: 8px 0 2px; }
   pre.json { background: color-mix(in srgb, CanvasText 7%, transparent); padding: 10px; border-radius: 8px;
              overflow: auto; max-height: 340px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+  pre.code { background: color-mix(in srgb, darkorange 12%, transparent); padding: 10px; border-radius: 8px;
+             overflow: auto; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
   ul.todos { list-style: none; padding-left: 0; }
   ul.todos li::before { content: "☐ "; }
   ul.todos li.done::before { content: "☑ "; }
   ul.todos li.doing::before { content: "▸ "; }
   .empty { padding: 40px; text-align: center; opacity:.5; }
+
+  /* 과정 요약 배지 — 어디서 검색/계산/조회/위임 했는지 한눈에 + 클릭 시 필터 */
+  .badges { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+  .badge { font: 600 12px ui-monospace, monospace; padding: 3px 9px; border-radius: 7px; cursor: pointer;
+           background: color-mix(in srgb, CanvasText 8%, transparent); border: 1px solid transparent; user-select:none; }
+  .badge.active { border-color: CanvasText; }
+  /* 타입별 색 — 좌측 막대로 타임라인을 스캔 가능하게 */
+  .step { margin: 5px 0; border-left: 3px solid color-mix(in srgb, CanvasText 20%, transparent); }
+  .step summary { font-weight: 500; }
+  .step.t-search { border-left-color: seagreen; }
+  .step.t-calc   { border-left-color: darkorange; }
+  .step.t-fin    { border-left-color: royalblue; }
+  .step.t-task   { border-left-color: mediumpurple; }
+  .step.t-read   { border-left-color: color-mix(in srgb, CanvasText 35%, transparent); }
+  .step.t-msg    { border-left-color: gold; }
+  .step.t-todo   { border-left-color: teal; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
@@ -43,6 +61,8 @@
 const root = document.getElementById("root");
 const esc = (s) => String(s).replace(/[&<>]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;" }[c]));
 const pretty = (o) => { try { return JSON.stringify(o, null, 2); } catch { return String(o); } };
+const fmtNum = (n) => (typeof n === "number" && isFinite(n)) ? n.toLocaleString("ko-KR") : n;
+const jparse = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
 // @@[id] 인용 토큰을 칩으로
 function citeChips(html) {
@@ -52,6 +72,12 @@ function renderMarkdown(text) {
   const t = text || "";
   if (window.marked) return citeChips(marked.parse(t));
   return citeChips(esc(t).replace(/\n/g, "<br>"));
+}
+// answer 본문이 인용한 고유 증거 id 모으기 (grounding 빠른 확인용)
+function citeIds(text) {
+  const ids = []; const re = /@@\[([^\]]+)\]/g; let m;
+  while ((m = re.exec(text || "")) !== null) if (!ids.includes(m[1])) ids.push(m[1]);
+  return ids;
 }
 
 // content 가 문자열 / [{type:"text",text}] 블록 배열 둘 다 처리
@@ -67,10 +93,43 @@ function unwrap(m) {
   const mm = Array.isArray(m) ? m[0] : m;
   return (mm && mm.kwargs) ? mm.kwargs : (mm || {});
 }
-function msgType(m) {
-  const d = unwrap(m);
-  return d.type || (Array.isArray(m) ? "" : (m && m.id && String(m.id).toLowerCase())) || "";
+
+// ── 도구별 요약 ──────────────────────────────────────────────────────
+// 가공은 최소: head 에 핵심 인자 하나만 짧게(검색 찾기 쉽게), body 는 input/
+// output JSON 을 거의 그대로 살린다. {icon, cls, head(HTML), detail(HTML)}.
+function jsonBody(args, out) {
+  return `<div class="label">input</div><pre class="json">${esc(pretty(args))}</pre>` +
+         (out ? `<div class="label">output</div><pre class="json">${esc(String(out).slice(0, 6000))}</pre>` : "");
 }
+function summarizeCall(name, args, out) {
+  const detail = jsonBody(args, out);
+  if (name === "smart_search")
+    return { icon: "🔎", cls: "t-search", head: `검색 «${esc((args && args.query) || "")}»`, detail };
+  if (name === "calculate") {
+    const o = jparse(out) || {};
+    const head = o.error ? `계산 ⚠ ${esc(o.error)}` : `계산 → <b>${esc(fmtNum(o.result))}</b>`;
+    return { icon: "🧮", cls: "t-calc", head, detail };
+  }
+  if (name === "finance_lookup") {
+    const p = Object.entries(args || {}).map(([k, v]) => `${k}=${esc(v)}`).join(", ");
+    return { icon: "💰", cls: "t-fin", head: `금융조회 ${esc(p)}`, detail };
+  }
+  if (name === "task")
+    return { icon: "📋", cls: "t-task", head: `위임 [${esc((args && args.subagent_type) || "?")}] ${esc((args && args.description) || "")}`, detail };
+  if (name === "read_evidence" || name === "evidence_pages") {
+    const pg = (args && args.start_page) ? ` <span class="muted">p.${args.start_page}${args.end_page ? "–" + args.end_page : ""}</span>` : "";
+    return { icon: "📄", cls: "t-read", head: `증거 <span class="cite">@@[${esc((args && args.id) || "")}]</span>${pg}`, detail };
+  }
+  return { icon: "🔧", cls: "t-gen", head: esc(name), detail };
+}
+// 타입별 배지/필터 키 (write_todos 는 계획이라 별도 색)
+const TOOL_META = {
+  smart_search:  { icon: "🔎", key: "t-search", ko: "검색" },
+  calculate:     { icon: "🧮", key: "t-calc",   ko: "계산" },
+  finance_lookup:{ icon: "💰", key: "t-fin",    ko: "금융조회" },
+  task:          { icon: "📋", key: "t-task",   ko: "위임" },
+  write_todos:   { icon: "🧭", key: "t-todo",   ko: "계획" },
+};
 
 function renderState(data, inputs) {
   const msgs = (data && data.messages) || (data && data.update && data.update.messages) || [];
@@ -95,6 +154,24 @@ function renderState(data, inputs) {
     if ((d.type || "").toLowerCase() === "human") { question = contentText(d.content); break; }
   }
 
+  // tool 결과를 tool_call_id 로 인덱싱 (호출↔결과 짝짓기)
+  const results = {};
+  msgs.forEach(m => {
+    const d = unwrap(m);
+    if ((d.type || "").toLowerCase() === "tool" && d.tool_call_id) results[d.tool_call_id] = contentText(d.content);
+  });
+
+  // 도구 호출 집계 (과정 요약 배지)
+  const counts = {};
+  msgs.forEach(m => {
+    const d = unwrap(m);
+    const calls = d.tool_calls || (d.additional_kwargs && d.additional_kwargs.tool_calls) || [];
+    calls.forEach(c => {
+      const nm = c.name || (c.function && c.function.name) || "?";
+      counts[nm] = (counts[nm] || 0) + 1;
+    });
+  });
+
   const parts = [];
   if (question) parts.push(`<h2>질문</h2><div class="muted">${esc(question)}</div>`);
 
@@ -102,40 +179,79 @@ function renderState(data, inputs) {
   parts.push(answer ? `<div class="answer">${renderMarkdown(answer)}</div>`
                     : `<div class="muted">텍스트 답변 없음 (tool-only turn?)</div>`);
 
+  // 근거(인용) 요약 — 답이 실제로 인용한 고유 증거 id
+  const ids = citeIds(answer);
+  if (ids.length) {
+    parts.push(`<div class="label">근거 ${ids.length}개 (답변이 인용한 증거)</div>` +
+      `<div>${ids.map(id => `<span class="cite">@@[${esc(id)}]</span>`).join(" ")}</div>`);
+  }
+
   if (todos.length) {
-    parts.push(`<h3>todos</h3><ul class="todos">` + todos.map(t => {
+    parts.push(`<h3>계획(todos)</h3><ul class="todos">` + todos.map(t => {
       const cls = t.status === "completed" ? "done" : t.status === "in_progress" ? "doing" : "";
       return `<li class="${cls}">${esc(t.content || "")}</li>`;
     }).join("") + `</ul>`);
   }
 
-  // 메시지 타임라인 (tool 호출 입출력)
-  const rows = msgs.map((m) => {
+  // 과정 요약 배지 — 클릭하면 타임라인을 그 타입만 보이게 필터
+  const badgeKeys = ["smart_search", "calculate", "finance_lookup", "task", "write_todos"];
+  const badges = badgeKeys.filter(k => counts[k]).map(k => {
+    const meta = TOOL_META[k];
+    return `<span class="badge" data-filter="${meta.key}">${meta.icon} ${meta.ko}×${counts[k]}</span>`;
+  });
+  const readN = (counts.read_evidence || 0) + (counts.evidence_pages || 0);
+  if (readN) badges.push(`<span class="badge" data-filter="t-read">📄 증거열람×${readN}</span>`);
+
+  // 타임라인 — 호출을 도구별로 렌더(짝지은 결과 포함), 사이사이 ai 추론 텍스트
+  const rows = [];
+  msgs.forEach(m => {
     const d = unwrap(m);
     const ty = (d.type || "").toLowerCase();
-    if (ty === "tool") {
-      return `<details><summary class="tool">🔧 tool result</summary><div class="body">
-        <pre class="json">${esc(contentText(d.content)).slice(0, 6000)}</pre></div></details>`;
-    }
     const calls = d.tool_calls || (d.additional_kwargs && d.additional_kwargs.tool_calls) || [];
     if (calls.length) {
-      return calls.map(c => `<details><summary class="tool">🛠 ${esc(c.name || (c.function && c.function.name) || "?")}</summary>
-        <div class="body"><div class="label">input</div>
-        <pre class="json">${esc(pretty(c.args || (c.function && c.function.arguments) || {}))}</pre></div></details>`).join("");
+      calls.forEach(c => {
+        const nm = c.name || (c.function && c.function.name) || "?";
+        let a = c.args || (c.function && c.function.arguments) || {};
+        if (typeof a === "string") a = jparse(a) || { _raw: a };
+        if (nm === "write_todos") {
+          const list = (a.todos || []).map(t => {
+            const cls = t.status === "completed" ? "done" : t.status === "in_progress" ? "doing" : "";
+            return `<li class="${cls}">${esc(t.content || "")}</li>`;
+          }).join("");
+          rows.push(`<details class="step t-todo"><summary>🧭 계획 갱신 (${(a.todos || []).length})</summary>
+            <div class="body"><ul class="todos">${list}</ul></div></details>`);
+          return;
+        }
+        const out = results[c.id || c.tool_call_id] || "";
+        const s = summarizeCall(nm, a, out);
+        const body = s.detail ? `<div class="body">${s.detail}</div>` : "";
+        rows.push(`<details class="step ${s.cls}"><summary>${s.icon} ${s.head}</summary>${body}</details>`);
+      });
+    } else if (ty === "ai" || ty === "assistant") {
+      const txt = contentText(d.content);
+      if (txt.trim()) rows.push(`<details class="step t-msg"><summary>💬 ai 추론</summary>
+        <div class="body answer">${renderMarkdown(txt)}</div></details>`);
     }
-    const txt = contentText(d.content);
-    if ((ty === "ai" || ty === "assistant") && txt.trim()) {
-      return `<details><summary>💬 ai message</summary><div class="body answer">${renderMarkdown(txt)}</div></details>`;
-    }
-    return "";
-  }).filter(Boolean).join("");
+  });
 
-  if (rows) parts.push(`<h3>타임라인 (${msgs.length} 메시지)</h3>${rows}`);
+  if (badges.length) parts.push(`<div class="badges">${badges.join("")}</div>`);
+  if (rows.length) parts.push(`<h3>과정 타임라인 (${msgs.length} 메시지)</h3><div id="timeline">${rows.join("")}</div>`);
 
   parts.push(`<details style="margin-top:16px"><summary>원본 JSON</summary>
     <div class="body"><pre class="json">${esc(pretty(data))}</pre></div></details>`);
 
   root.innerHTML = parts.join("\n");
+
+  // 배지 클릭 → 해당 타입 step 만 표시(토글). 다시 누르면 전체.
+  let active = null;
+  root.querySelectorAll(".badge").forEach(b => b.addEventListener("click", () => {
+    const f = b.dataset.filter;
+    active = (active === f) ? null : f;
+    root.querySelectorAll(".badge").forEach(x => x.classList.toggle("active", x.dataset.filter === active));
+    root.querySelectorAll("#timeline .step").forEach(s => {
+      s.classList.toggle("hidden", active !== null && !s.classList.contains(active));
+    });
+  }));
 }
 
 // LangSmith → postMessage: { type:"output"|"reference", data, metadata:{inputs} }
