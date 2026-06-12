@@ -35,6 +35,8 @@
   ul.todos li.done::before { content: "☑ "; }
   ul.todos li.doing::before { content: "▸ "; }
   .empty { padding: 40px; text-align: center; opacity:.5; }
+  .qid { display:inline-block; font:700 12px ui-monospace, monospace; padding:3px 10px; border-radius:7px;
+         background: color-mix(in srgb, mediumpurple 26%, transparent); color: mediumpurple; margin-bottom:8px; }
 
   /* 과정 요약 배지 — 어디서 검색/계산/조회/위임 했는지 한눈에 + 클릭 시 필터 */
   .badges { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
@@ -131,7 +133,22 @@ const TOOL_META = {
   write_todos:   { icon: "🧭", key: "t-todo",   ko: "계획" },
 };
 
-function renderState(data, inputs) {
+// qid(예: C2-S2)는 LangSmith run 의 tag/metadata 다 — 공식 postMessage 계약은
+// data + metadata.inputs 만 보장하므로 안 올 수도 있다. 올 법한 위치를 방어적으로
+// 훑어 있으면 쓰고, 없으면 null.
+function findQid(data, meta) {
+  const m = meta || {};
+  const cands = [
+    m.qid, m.metadata && m.metadata.qid, m.extra && m.extra.metadata && m.extra.metadata.qid,
+    Array.isArray(m.tags) && m.tags[0],
+    data && data.metadata && data.metadata.qid,
+  ];
+  return cands.find(x => typeof x === "string" && x) || null;
+}
+
+function renderState(data, meta) {
+  const inputs = meta && meta.inputs;
+  const qid = findQid(data, meta);
   const msgs = (data && data.messages) || (data && data.update && data.update.messages) || [];
   const todos = (data && data.todos) || [];
 
@@ -173,6 +190,7 @@ function renderState(data, inputs) {
   });
 
   const parts = [];
+  if (qid) parts.push(`<div class="qid">질문 ${esc(qid)}</div>`);
   if (question) parts.push(`<h2>질문</h2><div class="muted">${esc(question)}</div>`);
 
   parts.push(`<h2>최종 답변</h2>`);
@@ -259,8 +277,7 @@ window.addEventListener("message", (ev) => {
   const msg = ev.data;
   if (!msg || typeof msg !== "object") return;
   if (msg.type !== "output" && msg.type !== "reference") return;
-  const inputs = msg.metadata && msg.metadata.inputs;
-  try { renderState(msg.data, inputs); }
+  try { renderState(msg.data, msg.metadata); }
   catch (e) { root.innerHTML = `<pre class="json">렌더 오류: ${esc(e && e.message)}\n\n${esc(pretty(msg.data))}</pre>`; }
 });
 </script>
