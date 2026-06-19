@@ -146,10 +146,76 @@ function findQid(data, meta) {
   return cands.find(x => typeof x === "string" && x) || null;
 }
 
+// ── flat 출력(leak-test experiment·dataset reference) ────────────────
+// upload 스크립트가 messages 대신 {answer, golden, auto_flag, citation, clarify,
+// status, tools, 탐색, ai_verdict, ai_review} 평면 dict 로 올린 경우. messages 기반
+// 타임라인이 없으므로 답변·골든·AI채점·스캔플래그를 그대로 펴서 보여준다.
+function renderFlat(data, meta, qid) {
+  const inputs = meta && meta.inputs;
+  let question = (inputs && typeof inputs.question === "string") ? inputs.question : "";
+  if (!question) {
+    const inMsgs = (inputs && inputs.messages) || [];
+    for (let i = inMsgs.length - 1; i >= 0; i--) {
+      const d = unwrap(inMsgs[i]);
+      if ((d.type || "").toLowerCase() === "human") { question = contentText(d.content); break; }
+    }
+  }
+  const has = (k) => {
+    const v = data[k];
+    return v != null && String(v).trim() !== "" && String(v).trim() !== "—";
+  };
+  const parts = [];
+  if (qid) parts.push(`<div class="qid">질문 ${esc(qid)}</div>`);
+
+  // AI 채점 배지 (pass/partial/wrong)
+  const V = { pass: ["✅ pass", "seagreen"], partial: ["◐ partial", "darkorange"], wrong: ["❌ wrong", "crimson"] };
+  if (has("ai_verdict")) {
+    const v = V[String(data.ai_verdict).toLowerCase()] || [esc(data.ai_verdict), "slateblue"];
+    parts.push(`<div class="badges"><span class="badge" style="background:color-mix(in srgb, ${v[1]} 22%, transparent); border-color:${v[1]}">AI 채점 · ${v[0]}</span></div>`);
+  }
+
+  if (question) parts.push(`<h2>질문</h2><div class="muted">${esc(question)}</div>`);
+
+  // 최종 답변
+  if (data.answer != null) {
+    parts.push(`<h2>최종 답변</h2>`);
+    const ans = String(data.answer);
+    parts.push(ans.trim() ? `<div class="answer">${renderMarkdown(ans)}</div>`
+                          : `<div class="muted">무응답 — 빈 답변(턴 소진/에러 가능)</div>`);
+    const ids = citeIds(ans);
+    if (ids.length) parts.push(`<div class="label">근거 ${ids.length}개 (답변이 인용한 증거)</div>` +
+      `<div>${ids.map(id => `<span class="cite">@@[${esc(id)}]</span>`).join(" ")}</div>`);
+  }
+
+  // AI 채점 근거
+  if (has("ai_review")) parts.push(`<div class="label">AI 채점 근거</div>` +
+    `<div class="answer">${renderMarkdown(String(data.ai_review))}</div>`);
+
+  // 골든(정답 reference) — dataset 뷰이거나 비교용으로 같이 온 경우
+  if (data.golden != null) parts.push(`<h2>골든 (정답 reference)</h2>` +
+    `<div class="answer">${renderMarkdown(String(data.golden))}</div>`);
+
+  // 스캔 플래그 요약 (자동판정·상태·탐색·인용·clarify·도구)
+  const FLAGS = [["auto_flag","자동판정"],["status","상태"],["탐색","탐색"],["citation","인용"],["clarify","clarify"],["tools","도구"]];
+  const rows = FLAGS.filter(([k]) => has(k))
+    .map(([k, ko]) => `<tr><td class="muted">${esc(ko)}</td><td>${esc(String(data[k]))}</td></tr>`);
+  if (rows.length) parts.push(`<details open style="margin-top:12px"><summary>스캔 플래그</summary>` +
+    `<div class="body"><div class="answer"><table>${rows.join("")}</table></div></div></details>`);
+
+  parts.push(`<details style="margin-top:16px"><summary>원본 JSON</summary>
+    <div class="body"><pre class="json">${esc(pretty(data))}</pre></div></details>`);
+
+  root.innerHTML = parts.join("\n");
+}
+
 function renderState(data, meta) {
   const inputs = meta && meta.inputs;
   const qid = findQid(data, meta);
   const msgs = (data && data.messages) || (data && data.update && data.update.messages) || [];
+  // messages 없이 answer/golden 등 평면 dict 로 온 출력은 flat 렌더로 분기.
+  if (!msgs.length && data && typeof data === "object" && (data.answer != null || data.golden != null)) {
+    return renderFlat(data, meta, qid);
+  }
   const todos = (data && data.todos) || [];
 
   // 최종 답변 = 마지막 ai/assistant 텍스트 메시지
