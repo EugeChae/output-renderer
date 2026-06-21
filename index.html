@@ -236,6 +236,11 @@ function computeMarks(answer, counts, turns, toolOutputs) {
   const marks = [];
   const ans = (answer || "").trim();
   if (!ans) marks.push(["EMPTY_ANSWER", "red", "빈 답변 — 턴 소진/에러 가능"]);
+  // transient LLM 오류: runner.py 의 고정 안내문구(TRANSIENT_LLM_ERROR_USER_MESSAGE)가
+  // 최종 답으로 노출된 경우 = 429/529/5xx 재시도 소진. 상태코드 span 은 루트에 안 오므로
+  // 이 고정문구가 유일한 루트 신호.
+  if (/요청이 많아 응답을 완료하지 못했어요/.test(ans))
+    marks.push(["TRANSIENT_ERR", "yellow", "일시적 LLM 오류(레이트리밋·과부하) 재시도 소진 → 고정 안내문구. 재실행 권장"]);
   const hay = ans + "\n" + (toolOutputs || []).join("\n");
   if (/source-/.test(hay)) marks.push(["SOURCE_LEAK", "yellow", "source- 접두사 누수 (정상은 _cite_id 가 벗김)"]);
   const retrieval = (counts.smart_search || 0) + (counts.read_evidence || 0) + (counts.task || 0);
