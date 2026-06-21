@@ -54,6 +54,45 @@
   .step.t-msg    { border-left-color: gold; }
   .step.t-todo   { border-left-color: teal; }
   .hidden { display: none; }
+
+  /* shape strip — 궤적을 한 줄로: 도구 타입 칩(타임라인과 동일 팔레트) + 턴수·종료 */
+  .shape { display:flex; align-items:center; flex-wrap:wrap; gap:4px; margin:10px 0; padding:8px 10px;
+           border:1px solid color-mix(in srgb, CanvasText 14%, transparent); border-radius:8px;
+           font:12px ui-monospace, monospace; }
+  .shape-chip { padding:2px 7px; border-radius:6px; border-left:3px solid;
+                background: color-mix(in srgb, CanvasText 6%, transparent); }
+  .shape-chip.t-search{ border-left-color:seagreen; } .shape-chip.t-calc{ border-left-color:darkorange; }
+  .shape-chip.t-fin{ border-left-color:royalblue; }   .shape-chip.t-task{ border-left-color:mediumpurple; }
+  .shape-chip.t-read{ border-left-color:color-mix(in srgb, CanvasText 35%, transparent); }
+  .shape-chip.t-msg{ border-left-color:gold; }        .shape-chip.t-todo{ border-left-color:teal; }
+  .shape-chip.t-gen{ border-left-color:color-mix(in srgb, CanvasText 30%, transparent); }
+  .shape-arrow{ opacity:.35; }
+  .shape-meta{ margin-left:auto; opacity:.6; }
+  /* significant marks — 싼 이상 지문 배지(심각도 색) */
+  .marks{ display:flex; gap:6px; flex-wrap:wrap; margin:0 0 10px; }
+  .mark{ font:600 11px ui-monospace, monospace; padding:2px 8px; border-radius:6px; border:1px solid; cursor:default; }
+  .mark.sev-ok{ opacity:.5; border-color:color-mix(in srgb, CanvasText 20%, transparent); background:transparent; }
+
+  /* 추론 경로 무결성(Reasoning Path Integrity) — 질문→위임/검색→읽기→인용→답변
+     연결이 온전한지 + 인용 증거가 루트에서 실제 열람·검증됐는지(grounding) */
+  .integrity{ margin:10px 0; padding:10px 12px; border-radius:10px;
+              border:1px solid color-mix(in srgb, CanvasText 16%, transparent); }
+  .integrity.i-ok{   border-color:color-mix(in srgb, seagreen 55%, transparent);  background:color-mix(in srgb, seagreen 8%, transparent); }
+  .integrity.i-warn{ border-color:color-mix(in srgb, goldenrod 60%, transparent); background:color-mix(in srgb, goldenrod 9%, transparent); }
+  .integrity.i-bad{  border-color:color-mix(in srgb, crimson 60%, transparent);   background:color-mix(in srgb, crimson 9%, transparent); }
+  .i-title{ font-weight:700; font-size:13px; }
+  .i-title .muted{ font-weight:400; }
+  /* 척추: 단계 노드 체인 (off 단계는 흐리게+취소선으로 "건너뜀"을 표시) */
+  .spine{ display:flex; align-items:center; flex-wrap:wrap; gap:4px; margin:8px 0;
+          font:12px ui-monospace, monospace; }
+  .spine-node{ padding:2px 8px; border-radius:6px; background:color-mix(in srgb, CanvasText 7%, transparent); }
+  .spine-node.off{ opacity:.35; text-decoration:line-through; }
+  .spine-arrow{ opacity:.35; }
+  .i-grounding{ display:flex; flex-wrap:wrap; gap:5px; margin:6px 0; }
+  .cite.g-ok{   background:color-mix(in srgb, seagreen 22%, transparent);  color:seagreen; }
+  .cite.g-warn{ background:color-mix(in srgb, goldenrod 26%, transparent); color:color-mix(in srgb, goldenrod 80%, CanvasText); }
+  .cite.g-bad{  background:color-mix(in srgb, crimson 24%, transparent);   color:crimson; }
+  .i-verdict{ font-size:12px; opacity:.85; margin-top:4px; }
 </style>
 </head>
 <body>
@@ -132,6 +171,201 @@ const TOOL_META = {
   task:          { icon: "📋", key: "t-task",   ko: "위임" },
   write_todos:   { icon: "🧭", key: "t-todo",   ko: "계획" },
 };
+
+// ── 궤적 모양(shape) + 이상 마크 ──────────────────────────────────────
+// P1: postMessage 로 오는 루트 messages 만으로 계산 가능한 것만. 서브에이전트
+// 내부 검색·타이밍·토큰은 안 오므로(루트 1레벨) 검색척추·탐색누락 등 깊은 마크는
+// 풀 트레이스 덤프 몫. docs/qa/trace-reading-and-visualization.md 참조.
+const SHAPE_TYPE = {
+  smart_search:  { icon: "🔎", cls: "t-search" },
+  calculate:     { icon: "🧮", cls: "t-calc" },
+  finance_lookup:{ icon: "💰", cls: "t-fin" },
+  task:          { icon: "📋", cls: "t-task" },
+  read_evidence: { icon: "📄", cls: "t-read" },
+  evidence_pages:{ icon: "📄", cls: "t-read" },
+  write_todos:   { icon: "🧭", cls: "t-todo" },
+};
+// messages 를 시간순으로 훑어 도구타입 시퀀스(연속 동일타입은 ×N 압축) 생성
+function buildShape(msgs) {
+  const seq = [];
+  const push = (icon, cls, label) => {
+    const last = seq[seq.length - 1];
+    if (last && last.cls === cls && last.label === label) last.n++;
+    else seq.push({ icon, cls, label, n: 1 });
+  };
+  msgs.forEach(m => {
+    const d = unwrap(m);
+    const ty = (d.type || "").toLowerCase();
+    const calls = d.tool_calls || (d.additional_kwargs && d.additional_kwargs.tool_calls) || [];
+    if (calls.length) {
+      calls.forEach(c => {
+        const nm = c.name || (c.function && c.function.name) || "?";
+        const t = SHAPE_TYPE[nm] || { icon: "🔧", cls: "t-gen" };
+        let label = "";
+        if (nm === "task") {
+          let a = c.args || (c.function && c.function.arguments) || {};
+          if (typeof a === "string") a = jparse(a) || {};
+          label = a.subagent_type || "task";
+        }
+        push(t.icon, t.cls, label);
+      });
+    } else if ((ty === "ai" || ty === "assistant") && contentText(d.content).trim()) {
+      push("💬", "t-msg", "");
+    }
+  });
+  return seq;
+}
+// 턴 수 = 모델 호출 수 ≈ ai/assistant 메시지 수
+function turnCount(msgs) {
+  return msgs.filter(m => {
+    const ty = (unwrap(m).type || "").toLowerCase();
+    return ty === "ai" || ty === "assistant";
+  }).length;
+}
+function shapeStrip(seq, turns, term) {
+  const chips = seq.map(s =>
+    `<span class="shape-chip ${s.cls}">${s.icon}${s.label ? " " + esc(s.label) : ""}${s.n > 1 ? "×" + s.n : ""}</span>`
+  ).join(`<span class="shape-arrow">→</span>`);
+  return `<div class="shape">${chips}<span class="shape-meta">· ${turns}턴 · ${esc(term)}</span></div>`;
+}
+
+const MAX_TURNS = 55;                                    // recursion_limit=2×55+10=120 (runner.py)
+const TURN_BLOWN_AT = Math.round(MAX_TURNS * 0.8);       // 44
+// 루트 messages 로 계산 가능한 싼 마크만. [name, severity, desc]
+function computeMarks(answer, counts, turns, toolOutputs) {
+  const marks = [];
+  const ans = (answer || "").trim();
+  if (!ans) marks.push(["EMPTY_ANSWER", "red", "빈 답변 — 턴 소진/에러 가능"]);
+  const hay = ans + "\n" + (toolOutputs || []).join("\n");
+  if (/source-/.test(hay)) marks.push(["SOURCE_LEAK", "yellow", "source- 접두사 누수 (정상은 _cite_id 가 벗김)"]);
+  const retrieval = (counts.smart_search || 0) + (counts.read_evidence || 0) + (counts.task || 0);
+  if (ans && retrieval === 0 && ans.length > 120)
+    marks.push(["NO_RETRIEVAL", "orange", "검색·읽기·위임 0건인데 장문 답 — 근거 없는 답 의심"]);
+  if (turns >= TURN_BLOWN_AT)
+    marks.push(["TURN_BLOWN", "orange", `${turns}턴 — recursion 한계(${MAX_TURNS}) 근접 (무응답 전조)`]);
+  return marks;
+}
+function marksBar(marks) {
+  if (!marks.length) return `<div class="marks"><span class="mark sev-ok">✓ 이상 마크 없음</span></div>`;
+  const sev = { red: "crimson", orange: "darkorange", yellow: "goldenrod" };
+  return `<div class="marks">` + marks.map(([name, s, desc]) =>
+    `<span class="mark" style="background:color-mix(in srgb, ${sev[s]} 20%, transparent); border-color:${sev[s]}" title="${esc(desc)}">${esc(name)}</span>`
+  ).join("") + `</div>`;
+}
+
+// ── 추론 경로 무결성 (Reasoning Path Integrity) ───────────────────────
+// trace_analyze.py(P2) 의 검색 척추(seed→read→cite)를 렌더러에서 재현한다.
+// 서브에이전트 내부 트레이스는 루트에 안 오지만, task(위임) 도구의 *출력* 에
+// 서브에이전트가 반환한 citations[](근거 id+edge) 와 search_trace[]
+// ("N seed hits" / "+N neighbors" / "read_evidence: id=… page=…") 가 실려 온다.
+// 이를 캐서 seed 수·이웃 수·서브에이전트가 읽은 id·근거 id 를 복원 → 인용이
+// 어디서도(메인·서브) 안 읽힌/근거없는지(진짜 CITED_NOT_READ)까지 판정한다.
+function rootReadIds(msgs) {
+  const ids = new Set();
+  msgs.forEach(m => {
+    const d = unwrap(m);
+    const calls = d.tool_calls || (d.additional_kwargs && d.additional_kwargs.tool_calls) || [];
+    calls.forEach(c => {
+      const nm = c.name || (c.function && c.function.name) || "?";
+      if (nm === "read_evidence" || nm === "evidence_pages") {
+        let a = c.args || (c.function && c.function.arguments) || {};
+        if (typeof a === "string") a = jparse(a) || {};
+        if (a && a.id) ids.add(String(a.id).replace(/^source-/, ""));
+      }
+    });
+  });
+  return ids;
+}
+// 서브에이전트(task) 반환 JSON 파싱 → {cites:[id], seeds, neighbors, reads:[id], lowConf}
+function parseSubagentReturn(raw) {
+  let o = (typeof raw === "string") ? jparse(raw) : raw;
+  if (o && typeof o.content === "string") { const c = jparse(o.content); if (c) o = c; }
+  if (!o || typeof o !== "object") return null;
+  const cites = (Array.isArray(o.citations) ? o.citations : [])
+    .map(x => (x && x.id != null) ? String(x.id).replace(/^source-/, "") : null).filter(Boolean);
+  let seeds = 0, neighbors = 0, lowConf = false; const reads = [];
+  (Array.isArray(o.search_trace) ? o.search_trace : []).forEach(line => {
+    const s = String(line); let m;
+    if ((m = s.match(/(\d+)\s*seed hits/))) seeds += +m[1];
+    if ((m = s.match(/\+(\d+)\s*neighbors/))) neighbors += +m[1];
+    if ((m = s.match(/read_evidence:\s*id=([^\s,)]+)/))) reads.push(m[1].replace(/^source-/, ""));
+    if (/low[\s_]?confidence/i.test(s)) lowConf = true;
+  });
+  return { cites, seeds, neighbors, reads, lowConf };
+}
+function pathIntegrity(answer, msgs, counts, results) {
+  const cited = citeIds(answer).map(id => id.replace(/^source-/, ""));
+  const mainReads = rootReadIds(msgs);
+  const subReads = new Set(), subCited = new Set();
+  let seeds = 0, neighbors = 0, lowConf = false, tasks = 0;
+  msgs.forEach(m => {
+    const d = unwrap(m);
+    const calls = d.tool_calls || (d.additional_kwargs && d.additional_kwargs.tool_calls) || [];
+    calls.forEach(c => {
+      const nm = c.name || (c.function && c.function.name) || "?";
+      if (nm !== "task") return;
+      tasks++;
+      const p = parseSubagentReturn(results[c.id || c.tool_call_id]);
+      if (!p) return;
+      p.reads.forEach(r => subReads.add(r));
+      p.cites.forEach(x => subCited.add(x));
+      seeds += p.seeds; neighbors += p.neighbors; lowConf = lowConf || p.lowConf;
+    });
+  });
+  const reads = new Set([...mainReads, ...subReads]);
+  // 근거 = 어디서든 읽힘(메인/서브) ∪ 서브에이전트가 근거로 반환한 id
+  const grounded = new Set([...reads, ...subCited]);
+  const verified = cited.filter(id => grounded.has(id));
+  const unverified = cited.filter(id => !grounded.has(id));
+  return {
+    cited, verified, unverified, reads, grounded,
+    seeds, neighbors, lowConf, tasks,
+    searched: (counts.smart_search || 0) + (counts.finance_lookup || 0),
+  };
+}
+function integrityPanel(pi, answer) {
+  const ans = (answer || "").trim();
+  const node = (label, on) => `<span class="spine-node ${on ? "" : "off"}">${esc(label)}</span>`;
+  const searchLabel = (pi.seeds || pi.neighbors)
+    ? `검색 seed${pi.seeds}${pi.neighbors ? "·nbr" + pi.neighbors : ""}`
+    : (pi.searched ? `검색×${pi.searched}` : "검색");
+  const spine = [
+    node("질문", true),
+    node(`위임${pi.tasks ? "×" + pi.tasks : ""}`, pi.tasks > 0),
+    node(searchLabel, (pi.seeds + pi.neighbors + pi.searched) > 0),
+    node(`읽기×${pi.reads.size}`, pi.reads.size > 0),
+    node(`인용×${pi.cited.length}`, pi.cited.length > 0),
+    node("답변", !!ans),
+  ].join(`<span class="spine-arrow">→</span>`)
+    + (pi.lowConf ? ` <span class="muted" title="검색 신뢰도 낮음(low_confidence)">⚠ low-conf</span>` : "");
+
+  const chips = pi.cited.map(id => {
+    const ok = pi.grounded.has(id);
+    const tip = ok ? "검색·읽기로 근거 확인됨 (메인 또는 서브에이전트)"
+                   : "어느 단계에서도 읽힌/근거된 흔적 없음 — 환각 의심";
+    return `<span class="cite ${ok ? "g-ok" : "g-bad"}" title="${esc(tip)}">${ok ? "✓" : "✗"} @@[${esc(id)}]</span>`;
+  }).join(" ");
+
+  let verdict, vcls;
+  if (!pi.cited.length && ans.length > 120 && !pi.tasks && !pi.searched && !pi.reads.size) {
+    verdict = "근거 0 — 검색·읽기·위임 없이 장문 답(무근거 의심)"; vcls = "bad";
+  } else if (pi.unverified.length) {
+    verdict = `인용 ${pi.cited.length}개 중 근거확인 ${pi.verified.length} · 무근거 ${pi.unverified.length}개: ${pi.unverified.map(id => "@@[" + id + "]").join(" ")}`;
+    vcls = "bad";
+  } else if (pi.seeds && !pi.reads.size && !pi.cited.length) {
+    verdict = `seed ${pi.seeds}개 검색했지만 한 건도 안 읽음 (HITS_IGNORED)`; vcls = "warn";
+  } else if (pi.cited.length) {
+    verdict = `인용 ${pi.cited.length}개 전부 근거 확인됨 · 척추 seed ${pi.seeds}→읽기 ${pi.reads.size}→인용 ${pi.cited.length}`; vcls = "ok";
+  } else {
+    verdict = "인용 없음"; vcls = "warn";
+  }
+  return `<div class="integrity i-${vcls}">
+    <div class="i-title">추론 경로 무결성 <span class="muted">Reasoning Path Integrity</span></div>
+    <div class="spine">${spine}</div>
+    ${chips ? `<div class="i-grounding">${chips}</div>` : ""}
+    <div class="i-verdict">${esc(verdict)}</div>
+  </div>`;
+}
 
 // qid(예: C2-S2)는 LangSmith run 의 tag/metadata 다 — 공식 postMessage 계약은
 // data + metadata.inputs 만 보장하므로 안 올 수도 있다. 올 법한 위치를 방어적으로
@@ -255,20 +489,36 @@ function renderState(data, meta) {
     });
   });
 
+  // 궤적 모양 + 이상 마크 (루트 messages 기반, P1)
+  const seq = buildShape(msgs);
+  const turns = turnCount(msgs);
+  const marks = computeMarks(answer, counts, turns, Object.values(results));
+
+  // 추론 경로 무결성 — task 출력의 citations/search_trace 로 서브에이전트 seed·
+  // 읽기·근거까지 복원해 검색 척추(seed→read→cite)를 재현(trace_analyze 동급)
+  const pi = pathIntegrity(answer, msgs, counts, results);
+  if (answer.trim() && pi.unverified.length)
+    marks.push(["CITED_NOT_READ", "red",
+      `인용 ${pi.unverified.length}개가 어디서도 안 읽힘/근거없음 — 환각 의심: ${pi.unverified.join(", ")}`]);
+  if (pi.seeds && pi.reads.size === 0 && pi.grounded.size === 0)
+    marks.push(["HITS_IGNORED", "orange", `seed ${pi.seeds}개 검색했지만 한 건도 안 읽음`]);
+  if (pi.lowConf && answer.trim())
+    marks.push(["LOWCONF_CONFIDENT", "orange", "검색 신뢰도 낮은데 단정 답변 (low_confidence)"]);
+
   const parts = [];
   if (qid) parts.push(`<div class="qid">질문 ${esc(qid)}</div>`);
   if (question) parts.push(`<h2>질문</h2><div class="muted">${esc(question)}</div>`);
+
+  if (seq.length) parts.push(shapeStrip(seq, turns, answer.trim() ? "완료" : "무응답"));
+  parts.push(marksBar(marks));
 
   parts.push(`<h2>최종 답변</h2>`);
   parts.push(answer ? `<div class="answer">${renderMarkdown(answer)}</div>`
                     : `<div class="muted">텍스트 답변 없음 (tool-only turn?)</div>`);
 
-  // 근거(인용) 요약 — 답이 실제로 인용한 고유 증거 id
-  const ids = citeIds(answer);
-  if (ids.length) {
-    parts.push(`<div class="label">근거 ${ids.length}개 (답변이 인용한 증거)</div>` +
-      `<div>${ids.map(id => `<span class="cite">@@[${esc(id)}]</span>`).join(" ")}</div>`);
-  }
+  // 추론 경로 무결성 — 척추(질문→위임/검색→읽기→인용→답변) + 인용별 grounding 검증
+  if (pi.cited.length || pi.tasks || pi.reads.size || answer.trim())
+    parts.push(integrityPanel(pi, answer));
 
   if (todos.length) {
     parts.push(`<h3>계획(todos)</h3><ul class="todos">` + todos.map(t => {
